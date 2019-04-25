@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2015 - 2018 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
+  Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -240,10 +240,9 @@ VOID DispatchCreate(HANDLE Handle, // This handle is not for a file. It is for
           EventContext->Operation.Create.ShareAccess, disposition, options,
           &fileInfo);
 
-    if (CreateSuccesStatusCheck(status, disposition)) {
-      if (!childExisted) {
+    if (CreateSuccesStatusCheck(status, disposition)
+      && !childExisted) {
         eventInfo.Operation.Create.Information = FILE_DOES_NOT_EXIST;
-      }
     }
   } else {
     status = STATUS_NOT_IMPLEMENTED;

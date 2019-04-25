@@ -1,7 +1,8 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2015 - 2018 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
+  Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
+  Copyright (C) 2017 Google, Inc.
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -25,6 +26,9 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #pragma alloc_text(PAGE, DokanDispatchCreate)
 #pragma alloc_text(PAGE, DokanCheckShareAccess)
 #endif
+
+static const UNICODE_STRING keepAliveFileName =
+    RTL_CONSTANT_STRING(DOKAN_KEEPALIVE_FILE_NAME);
 
 // We must NOT call without VCB lock
 PDokanFCB DokanAllocateFCB(__in PDokanVCB Vcb, __in PWCHAR FileName,
@@ -117,15 +121,12 @@ PDokanFCB DokanGetFCB(__in PDokanVCB Vcb, __in PWCHAR FileName,
     DDbgPrint("  DokanGetFCB has entry FileName: %wZ FileCount: %lu. Looking "
               "for %ls\n",
               &fcb->FileName, fcb->FileCount, FileName);
-    if (fcb->FileName.Length == FileNameLength) {
-      // FileNameLength in bytes
-
+    if (fcb->FileName.Length == FileNameLength // FileNameLength in bytes
+        && RtlEqualUnicodeString(&fn, &fcb->FileName, !CaseSensitive)) {
       // we have the FCB which is already allocated and used
-      if (RtlEqualUnicodeString(&fn, &fcb->FileName, !CaseSensitive)) {
-        DDbgPrint("  Found existing FCB for %ls\n", FileName);
-        DokanFCBUnlock(fcb);
-        break;
-      }
+      DDbgPrint("  Found existing FCB for %ls\n", FileName);
+      DokanFCBUnlock(fcb);
+      break;
     }
     DokanFCBUnlock(fcb);
 
@@ -148,6 +149,10 @@ PDokanFCB DokanGetFCB(__in PDokanVCB Vcb, __in PWCHAR FileName,
     }
 
     ASSERT(fcb != NULL);
+    if (RtlEqualUnicodeString(&fcb->FileName, &keepAliveFileName, FALSE)) {
+      fcb->IsKeepalive = TRUE;
+      fcb->BlockUserModeDispatch = TRUE;
+    }
 
     // we already have FCB
   } else {
@@ -403,7 +408,7 @@ Otherwise, STATUS_SHARING_VIOLATION is returned.
 #if (NTDDI_VERSION >= NTDDI_VISTA)
   //
   //  Do an extra test for writeable user sections if the user did not allow
-  //  write sharing - this is neccessary since a section may exist with no
+  //  write sharing - this is necessary since a section may exist with no
   //  handles
   //  open to the file its based against.
   //
@@ -538,23 +543,29 @@ Return Value:
     }
 
     if (!vcb->HasEventWait) {
-      DDbgPrint("  Here we only go in if some antivirus software tries to "
-                "create files before startup is finished.\n");
-      if (fileObject->FileName.Length > 0) {
-        DDbgPrint("  Verify if the system tries to access System Volume\n");
-        UNICODE_STRING systemVolume;
-        RtlInitUnicodeString(&systemVolume, L"\\System Volume Information");
-        BOOLEAN isSystemVolumeAccess =
-            StartsWith(&fileObject->FileName, &systemVolume);
-        if (isSystemVolumeAccess) {
-          DDbgPrint("  It's an access to System Volume, so don't return "
-                    "SUCCESS. We don't have one.\n");
-          status = STATUS_NO_SUCH_FILE;
+      if (fileObject->FileName.Length > 0 &&
+          RtlEqualUnicodeString(&fileObject->FileName, &keepAliveFileName,
+                                FALSE)) {
+        DDbgPrint("  Keepalive file called before startup finished\n");
+      } else {
+          DDbgPrint("  Here we only go in if some antivirus software tries to "
+                    "create files before startup is finished.\n");
+          if (fileObject->FileName.Length > 0) {
+            DDbgPrint("  Verify if the system tries to access System Volume\n");
+            UNICODE_STRING systemVolume;
+            RtlInitUnicodeString(&systemVolume, L"\\System Volume Information");
+            BOOLEAN isSystemVolumeAccess =
+                StartsWith(&fileObject->FileName, &systemVolume);
+            if (isSystemVolumeAccess) {
+              DDbgPrint("  It's an access to System Volume, so don't return "
+                        "SUCCESS. We don't have one.\n");
+              status = STATUS_NO_SUCH_FILE;
+              __leave;
+            }
+          }
+          status = STATUS_SUCCESS;
           __leave;
-        }
       }
-      status = STATUS_SUCCESS;
-      __leave;
     }
 
     DDbgPrint("  IrpSp->Flags = %d\n", irpSp->Flags);
@@ -582,40 +593,38 @@ Return Value:
                     fileObject->FileName.Length);
     }
 
-    // Get RelatedFileObject filename.
-    if (relatedFileObject != NULL) {
+    if (relatedFileObject != NULL // Get RelatedFileObject filename.
+        && relatedFileObject->FsContext2) {
       // Using relatedFileObject->FileName is not safe here, use cached filename
       // from context.
-      if (relatedFileObject->FsContext2) {
-        PDokanCCB relatedCcb = (PDokanCCB)relatedFileObject->FsContext2;
-        if (relatedCcb->Fcb) {
-          relatedFcb = relatedCcb->Fcb;
-          DokanFCBLockRO(relatedFcb);
-          if (relatedFcb->FileName.Length > 0 &&
-              relatedFcb->FileName.Buffer != NULL) {
-            relatedFileName = ExAllocatePool(sizeof(UNICODE_STRING));
-            if (relatedFileName == NULL) {
-              DDbgPrint("    Can't allocatePool for relatedFileName\n");
-              status = STATUS_INSUFFICIENT_RESOURCES;
-              DokanFCBUnlock(relatedFcb);
-              __leave;
-            }
-            relatedFileName->Buffer =
-                ExAllocatePool(relatedFcb->FileName.MaximumLength);
-            if (relatedFileName->Buffer == NULL) {
-              DDbgPrint("    Can't allocatePool for relatedFileName buffer\n");
-              ExFreePool(relatedFileName);
-              relatedFileName = NULL;
-              status = STATUS_INSUFFICIENT_RESOURCES;
-              DokanFCBUnlock(relatedFcb);
-              __leave;
-            }
-            relatedFileName->MaximumLength = relatedFcb->FileName.MaximumLength;
-            relatedFileName->Length = relatedFcb->FileName.Length;
-            RtlUnicodeStringCopy(relatedFileName, &relatedFcb->FileName);
+      PDokanCCB relatedCcb = (PDokanCCB)relatedFileObject->FsContext2;
+      if (relatedCcb->Fcb) {
+        relatedFcb = relatedCcb->Fcb;
+        DokanFCBLockRO(relatedFcb);
+        if (relatedFcb->FileName.Length > 0 &&
+            relatedFcb->FileName.Buffer != NULL) {
+          relatedFileName = ExAllocatePool(sizeof(UNICODE_STRING));
+          if (relatedFileName == NULL) {
+            DDbgPrint("    Can't allocatePool for relatedFileName\n");
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            DokanFCBUnlock(relatedFcb);
+            __leave;
           }
-          DokanFCBUnlock(relatedFcb);
+          relatedFileName->Buffer =
+              ExAllocatePool(relatedFcb->FileName.MaximumLength);
+          if (relatedFileName->Buffer == NULL) {
+            DDbgPrint("    Can't allocatePool for relatedFileName buffer\n");
+            ExFreePool(relatedFileName);
+            relatedFileName = NULL;
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            DokanFCBUnlock(relatedFcb);
+            __leave;
+          }
+          relatedFileName->MaximumLength = relatedFcb->FileName.MaximumLength;
+          relatedFileName->Length = relatedFcb->FileName.Length;
+          RtlUnicodeStringCopy(relatedFileName, &relatedFcb->FileName);
         }
+        DokanFCBUnlock(relatedFcb);
       }
     }
 
@@ -711,18 +720,16 @@ Return Value:
 
     // Fail if device is read-only and request involves a write operation
 
-    if (IS_DEVICE_READ_ONLY(DeviceObject)) {
+    if (IS_DEVICE_READ_ONLY(DeviceObject) &&
+        ((disposition == FILE_SUPERSEDE) || (disposition == FILE_CREATE) ||
+         (disposition == FILE_OVERWRITE) ||
+         (disposition == FILE_OVERWRITE_IF) ||
+         (irpSp->Parameters.Create.Options & FILE_DELETE_ON_CLOSE))) {
 
-      if ((disposition == FILE_SUPERSEDE) || (disposition == FILE_CREATE) ||
-          (disposition == FILE_OVERWRITE) ||
-          (disposition == FILE_OVERWRITE_IF) ||
-          (irpSp->Parameters.Create.Options & FILE_DELETE_ON_CLOSE)) {
-
-        DDbgPrint("    Media is write protected\n");
-        status = STATUS_MEDIA_WRITE_PROTECTED;
-        ExFreePool(fileName);
-        __leave;
-      }
+      DDbgPrint("    Media is write protected\n");
+      status = STATUS_MEDIA_WRITE_PROTECTED;
+      ExFreePool(fileName);
+      __leave;
     }
 
     if (irpSp->Flags & SL_OPEN_TARGET_DIRECTORY) {
@@ -741,6 +748,10 @@ Return Value:
     if (fcb == NULL) {
       status = STATUS_INSUFFICIENT_RESOURCES;
       __leave;
+    }
+    if (fcb->BlockUserModeDispatch) {
+      DDbgPrint("Opened file with user mode dispatch blocked: %wZ\n",
+                   &fileObject->FileName);
     }
     DDbgPrint("  Create: FileName:%wZ got fcb %p\n", &fileObject->FileName,
               fcb);
@@ -788,6 +799,15 @@ Return Value:
     fileObject->FsContext2 = ccb;
     fileObject->PrivateCacheMap = NULL;
     fileObject->SectionObjectPointer = &fcb->SectionObjectPointers;
+    if (fcb->IsKeepalive) {
+      DDbgPrint("Opened keepalive file from process %d.",
+                   IoGetRequestorProcessId(Irp));
+    }
+    if (fcb->BlockUserModeDispatch) {
+      info = FILE_OPENED;
+      status = STATUS_SUCCESS;
+      __leave;
+    }
     // fileObject->Flags |= FILE_NO_INTERMEDIATE_BUFFERING;
 
     alignedEventContextSize = PointerAlignSize(sizeof(EVENT_CONTEXT));
@@ -1128,7 +1148,7 @@ Return Value:
           // won't work unless the oplock gets broken before the
           // user mode create happens.
           // It is believed that FILE_COMPLETE_IF_OPLOCKED is extremely
-          // rare and may never happend during normal operation.
+          // rare and may never happened during normal operation.
         } else {
 
           if (status == STATUS_SHARING_VIOLATION &&
@@ -1287,10 +1307,9 @@ Return Value:
       }
     }
 
-    if (parentDir) { // SL_OPEN_TARGET_DIRECTORY
-      // fcb owns parentDir, not fileName
-      if (fileName)
-        ExFreePool(fileName);
+    if (parentDir      // SL_OPEN_TARGET_DIRECTORY
+        && fileName) { // fcb owns parentDir, not fileName
+      ExFreePool(fileName);
     }
 
     DokanCompleteIrpRequest(Irp, status, info);
@@ -1301,14 +1320,16 @@ Return Value:
   return status;
 }
 
-VOID DokanCompleteCreate(__in PIRP_ENTRY IrpEntry,
-                         __in PEVENT_INFORMATION EventInfo) {
+NTSTATUS DokanCompleteCreate(__in PIRP_ENTRY IrpEntry,
+                             __in PEVENT_INFORMATION EventInfo,
+                             __in BOOLEAN Wait) {
   PIRP irp;
   PIO_STACK_LOCATION irpSp;
   NTSTATUS status;
   ULONG info;
   PDokanCCB ccb;
   PDokanFCB fcb;
+  BOOLEAN FCBAcquired = FALSE;
 
   irp = IrpEntry->Irp;
   irpSp = IrpEntry->IrpSp;
@@ -1320,7 +1341,15 @@ VOID DokanCompleteCreate(__in PIRP_ENTRY IrpEntry,
 
   fcb = ccb->Fcb;
   ASSERT(fcb != NULL);
-  DokanFCBLockRW(fcb);
+
+  if (FALSE == Wait) {
+    DokanFCBTryLockRW(fcb, FCBAcquired);
+    if (FALSE == FCBAcquired) {
+      return STATUS_PENDING;
+    }
+  } else {
+    DokanFCBLockRW(fcb);
+  }
 
   DDbgPrint("  FileName:%wZ\n", &fcb->FileName);
 
@@ -1422,4 +1451,6 @@ VOID DokanCompleteCreate(__in PIRP_ENTRY IrpEntry,
   DokanCompleteIrpRequest(irp, status, info);
 
   DDbgPrint("<== DokanCompleteCreate\n");
+
+  return STATUS_SUCCESS;
 }

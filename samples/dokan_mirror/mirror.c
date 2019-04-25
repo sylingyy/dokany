@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2015 - 2018 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
+  Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -265,8 +265,8 @@ MirrorCreateFile(LPCWSTR FileName, PDOKAN_IO_SECURITY_CONTEXT SecurityContext,
   // be opened.
   fileAttr = GetFileAttributes(filePath);
 
-  if (fileAttr != INVALID_FILE_ATTRIBUTES) {
-    if (fileAttr & FILE_ATTRIBUTE_DIRECTORY) {
+  if (fileAttr != INVALID_FILE_ATTRIBUTES
+    && fileAttr & FILE_ATTRIBUTE_DIRECTORY) {
       if (!(CreateOptions & FILE_NON_DIRECTORY_FILE)) {
         DokanFileInfo->IsDirectory = TRUE;
         // Needed by FindFirstFile to list files in it
@@ -276,7 +276,6 @@ MirrorCreateFile(LPCWSTR FileName, PDOKAN_IO_SECURITY_CONTEXT SecurityContext,
         DbgPrint(L"\tCannot open a dir as a file\n");
         return STATUS_FILE_IS_A_DIRECTORY;
       }
-    }
   }
 
   DbgPrint(L"\tFlagsAndAttributes = 0x%x\n", fileAttributesAndFlags);
@@ -827,6 +826,8 @@ MirrorFindFiles(LPCWSTR FileName,
   if (filePath[fileLen - 1] != L'\\') {
     filePath[fileLen++] = L'\\';
   }
+  if (fileLen + 1 >= DOKAN_MAX_PATH)
+    return STATUS_BUFFER_OVERFLOW;
   filePath[fileLen] = L'*';
   filePath[fileLen + 1] = L'\0';
 
@@ -907,6 +908,8 @@ MirrorDeleteDirectory(LPCWSTR FileName, PDOKAN_FILE_INFO DokanFileInfo) {
   if (filePath[fileLen - 1] != L'\\') {
     filePath[fileLen++] = L'\\';
   }
+  if (fileLen + 1 >= DOKAN_MAX_PATH)
+    return STATUS_BUFFER_OVERFLOW;
   filePath[fileLen] = L'*';
   filePath[fileLen + 1] = L'\0';
 
@@ -1365,8 +1368,9 @@ static NTSTATUS DOKAN_CALLBACK MirrorGetVolumeInformation(
   return STATUS_SUCCESS;
 }
 
+
+// Uncomment the function and set dokanOperations->GetDiskFreeSpace to personalize disk space
 /*
-//Uncomment for personalize disk space
 static NTSTATUS DOKAN_CALLBACK MirrorDokanGetDiskFreeSpace(
     PULONGLONG FreeBytesAvailable, PULONGLONG TotalNumberOfBytes,
     PULONGLONG TotalNumberOfFreeBytes, PDOKAN_FILE_INFO DokanFileInfo) {
